@@ -73,16 +73,21 @@ elif page == "SKU Zoom":
 elif page == "Help & FAQ":
     st.title("❓ Help & FAQ")
 
-    st.markdown("### 🧾 What file formats are accepted?")
-    st.markdown("- Excel (.xlsx)
-- CSV (.csv)")
+    st.markdown(""" 
+### 🧾 What file formats are accepted?
+- Excel (.xlsx)
+- CSV (.csv)
 
-    st.markdown("### 📅 What date formats are allowed?")
-    st.markdown("We support formats like `dd-mm-yyyy`, `yyyy-mm-dd`, `dd/mm/yyyy`, `dd.mm.yyyy`")
+### 📅 What date formats are allowed?
+We support formats like `dd-mm-yyyy`, `yyyy-mm-dd`, `dd/mm/yyyy`, `dd.mm.yyyy`
 
-    st.markdown("### 🧠 What is QuickCast?")
-    st.markdown("QuickCast is a Forecast-as-a-Service tool designed for non-technical users to generate 6-period forecasts per SKU.")
+### 🧠 What is QuickCast?
+QuickCast is a Forecast-as-a-Service tool designed for non-technical users to generate 6-period forecasts per SKU.
+""")
 
     st.markdown("### 📂 Download Templates")
-    st.download_button("Download Sample Template", data=open("data/sample_input.xlsx", "rb").read(), file_name="quickcast_template.xlsx")
-
+    try:
+        with open("data/sample_input.xlsx", "rb") as f:
+            st.download_button("Download Sample Template", data=f, file_name="quickcast_template.xlsx")
+    except FileNotFoundError:
+        st.info("Sample file not available yet.")
