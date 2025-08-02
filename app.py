@@ -11,7 +11,7 @@ st.sidebar.title("QuickCast")
 st.sidebar.markdown("Forecast-as-a-Service")
 page = st.sidebar.radio("Navigate", ["Home", "SKU Zoom", "Help & FAQ"])
 
-# Session state initialization
+# Session state
 if "data" not in st.session_state:
     st.session_state.data = None
 if "forecast_combined" not in st.session_state:
@@ -19,10 +19,9 @@ if "forecast_combined" not in st.session_state:
 if "kpis" not in st.session_state:
     st.session_state.kpis = None
 
-# Helper: aggregate historical data per SKU according to output granularity
+# Helper to aggregate historical data per SKU based on output granularity
 def aggregate_history(sku_df, output_granularity):
     df = sku_df.copy()
-    # Find date column
     date_col = next((c for c in df.columns if "date" in c.lower()), None)
     if date_col is None:
         return None
@@ -40,7 +39,6 @@ def aggregate_history(sku_df, output_granularity):
 
     agg = df.resample(rule).sum().reset_index()
     agg.rename(columns={date_col: "Date"}, inplace=True)
-    # Identify quantity column
     qty_col = next((c for c in agg.columns if c.lower() in ["quantity", "qty", "value"]), None)
     if qty_col is None:
         return None
@@ -75,54 +73,13 @@ if page == "Home":
 
     if st.session_state.data is not None:
         st.markdown("## Step 3: Forecast Settings")
-        input_granularity = st.selectbox("1️⃣ Granularity of uploaded data (informational)", ["Daily", "Weekly", "Monthly"])
+        _ = st.selectbox("1️⃣ Granularity of uploaded data (informational)", ["Daily", "Weekly", "Monthly"])
         output_granularity = st.selectbox("2️⃣ Output forecast granularity", ["Weekly", "Monthly"])
         horizon = st.selectbox("3️⃣ Forecast horizon", ["3 months", "6 months", "9 months"])
 
-        # Map horizon to number of output periods
+        # Determine forecast periods: weeks if Weekly, months if Monthly
         if output_granularity == "Weekly":
             horizon_map = {"3 months": 12, "6 months": 24, "9 months": 36}
-        else:  # Monthly
+        else:
             horizon_map = {"3 months": 3, "6 months": 6, "9 months": 9}
-        forecast_periods = horizon_map[horizon]
-
-        if st.button("Run Forecast"):
-            data = st.session_state.data
-            if "SKU" not in data.columns:
-                st.error("Input file must contain a 'SKU' column.")
-                st.stop()
-
-            skus = data["SKU"].unique()
-            all_output_rows = []
-            kpi_frames = []
-            best_model_summary = []
-
-            for sku in skus:
-                sku_df = data[data["SKU"] == sku].copy()
-
-                # Run forecast engine
-                forecast_result, kpi_df, error = run_all_models(sku_df, forecast_periods, output_granularity)
-                if error:
-                    st.warning(f"Skipping SKU {sku}: {error}")
-                    continue
-
-                # Historical aggregation
-                hist = aggregate_history(sku_df, output_granularity)
-                if hist is not None:
-                    for _, row in hist.iterrows():
-                        date = row["Date"]
-                        qty = row["Quantity"]
-                        week_num = int(pd.to_datetime(date).isocalendar().week)
-                        month_name = pd.to_datetime(date).strftime("%B")
-                        all_output_rows.append({
-                            "SKU": sku,
-                            "Date": date,
-                            "Week Number": week_num,
-                            "Month Name": month_name,
-                            "Forecast/Actual": "Actual",
-                            "Forecast Method": "-",
-                            "Quantity": qty
-                        })
-
-                # Forecast rows
-                if forecast_result is not No_
+        forecast_periods = horizon_map[hori]()
