@@ -1,53 +1,111 @@
 
 import pandas as pd
-from prophet import Prophet
-from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error, mean_absolute_error
 import numpy as np
+from prophet import Prophet
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from statsmodels.tsa.arima.model import ARIMA
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-def preprocess_and_aggregate(sku_df, input_granularity, output_granularity):
-    sku_df['Date'] = pd.to_datetime(sku_df['Date'])
-    sku_df = sku_df.sort_values('Date')
-    sku_df.set_index('Date', inplace=True)
+def mape(y_true, y_pred):
+    return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
 
-    if output_granularity == 'Weekly':
-        rule = 'W-MON'
-    elif output_granularity == 'Monthly':
-        rule = 'MS'
+def run_all_models(sku_df, forecast_periods, output_freq):
+    sku_df = sku_df.copy()
+    sku_df.columns = [c.strip() for c in sku_df.columns]
+
+    # Detect quantity column
+    possible_qty_cols = ["Quantity", "Qty", "Value"]
+    qty_col = next((col for col in possible_qty_cols if col in sku_df.columns), None)
+    if qty_col is None:
+        return None, None, "No quantity column found."
+
+    # Convert date
+    date_col = next((col for col in sku_df.columns if "date" in col.lower()), None)
+    if date_col is None:
+        return None, None, "No date column found."
+    sku_df[date_col] = pd.to_datetime(sku_df[date_col])
+
+    # Output frequency aggregation
+    if output_freq == "W":
+        sku_df["Period"] = sku_df[date_col].dt.to_period("W").dt.start_time
+    elif output_freq == "M":
+        sku_df["Period"] = sku_df[date_col].dt.to_period("M").dt.to_timestamp()
     else:
-        rule = 'D'
+        return None, None, "Invalid frequency"
 
-    agg_df = sku_df.resample(rule).sum().reset_index()
-    agg_df.rename(columns={'Date': 'ds', 'Quantity': 'y'}, inplace=True)
-    return agg_df
+    df = sku_df.groupby("Period").agg({qty_col: "sum"}).reset_index()
+    df = df.rename(columns={"Period": "ds", qty_col: "y"})
 
-def evaluate_forecast(y_true, y_pred):
-    mape = mean_absolute_percentage_error(y_true, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    mae = mean_absolute_error(y_true, y_pred)
-    return mape, rmse, mae
+    if len(df) < forecast_periods + 3:
+        return None, None, "Insufficient data after aggregation"
 
-def run_all_models(sku_df, forecast_periods, output_granularity):
+    train = df[:-forecast_periods]
+    test = df[-forecast_periods:]
+    results = {}
+    kpis = []
+
+    # Naive
     try:
-        df = preprocess_and_aggregate(sku_df, None, output_granularity)
+        naive_forecast = pd.Series([train["y"].iloc[-1]] * forecast_periods, index=test["ds"])
+        kpis.append(("Naive", mape(test["y"], naive_forecast), mean_squared_error(test["y"], naive_forecast, squared=False), mean_absolute_error(test["y"], naive_forecast), (naive_forecast - test["y"]).mean()))
+        results["Naive"] = naive_forecast
+    except:
+        pass
 
-        if df.shape[0] < 6:
-            raise ValueError("Not enough data after aggregation.")
+    # Moving Average
+    try:
+        ma_forecast = pd.Series([train["y"].rolling(3).mean().iloc[-1]] * forecast_periods, index=test["ds"])
+        kpis.append(("Moving Average", mape(test["y"], ma_forecast), mean_squared_error(test["y"], ma_forecast, squared=False), mean_absolute_error(test["y"], ma_forecast), (ma_forecast - test["y"]).mean()))
+        results["Moving Average"] = ma_forecast
+    except:
+        pass
 
-        # Prophet model
-        model = Prophet()
-        model.fit(df)
-        future = model.make_future_dataframe(periods=forecast_periods, freq='W' if output_granularity == 'Weekly' else 'MS')
-        forecast = model.predict(future)
-        forecast_df = forecast[['ds', 'yhat']].tail(forecast_periods)
-        forecast_df['Model'] = 'Prophet'
+    # ETS
+    try:
+        model_ets = ExponentialSmoothing(train["y"], seasonal=None, trend="add", initialization_method="estimated")
+        fit_ets = model_ets.fit()
+        ets_forecast = pd.Series(fit_ets.forecast(forecast_periods), index=test["ds"])
+        kpis.append(("ETS", mape(test["y"], ets_forecast), mean_squared_error(test["y"], ets_forecast, squared=False), mean_absolute_error(test["y"], ets_forecast), (ets_forecast - test["y"]).mean()))
+        results["ETS"] = ets_forecast
+    except:
+        pass
 
-        # KPIs (using last few periods from training)
-        y_true = df['y'].values[-forecast_periods:]
-        y_pred = model.predict(df[['ds']])['yhat'].values[-forecast_periods:]
-        mape, rmse, mae = evaluate_forecast(y_true, y_pred)
-        kpi_df = pd.DataFrame([{'Model': 'Prophet', 'MAPE': mape, 'RMSE': rmse, 'MAE': mae}])
+    # ARIMA
+    try:
+        model_arima = ARIMA(train["y"], order=(1, 1, 1))
+        fit_arima = model_arima.fit()
+        arima_forecast = pd.Series(fit_arima.forecast(steps=forecast_periods), index=test["ds"])
+        kpis.append(("ARIMA", mape(test["y"], arima_forecast), mean_squared_error(test["y"], arima_forecast, squared=False), mean_absolute_error(test["y"], arima_forecast), (arima_forecast - test["y"]).mean()))
+        results["ARIMA"] = arima_forecast
+    except:
+        pass
 
-        return forecast_df, kpi_df, None
+    # Prophet
+    try:
+        model_prophet = Prophet()
+        model_prophet.fit(train.rename(columns={"ds": "ds", "y": "y"}))
+        future = model_prophet.make_future_dataframe(periods=forecast_periods, freq=output_freq)
+        forecast = model_prophet.predict(future)
+        prophet_forecast = forecast.set_index("ds").loc[test["ds"]]["yhat"]
+        kpis.append(("Prophet", mape(test["y"], prophet_forecast), mean_squared_error(test["y"], prophet_forecast, squared=False), mean_absolute_error(test["y"], prophet_forecast), (prophet_forecast - test["y"]).mean()))
+        results["Prophet"] = prophet_forecast
+    except:
+        pass
 
-    except Exception as e:
-        return None, None, str(e)
+    kpi_df = pd.DataFrame(kpis, columns=["Model", "MAPE", "RMSE", "MAE", "Bias"])
+
+    if kpi_df.empty:
+        return None, None, "All models failed for this SKU."
+
+    best_model = kpi_df.sort_values("MAPE").iloc[0]["Model"]
+    forecast_values = results[best_model]
+
+    forecast_result = pd.DataFrame({
+        "SKU": sku_df["SKU"].iloc[0],
+        "Date": test["ds"],
+        "Forecast/Actual": "Forecast",
+        "Forecast Method": best_model,
+        "Quantity": forecast_values.values
+    })
+
+    return forecast_result, kpi_df, None
