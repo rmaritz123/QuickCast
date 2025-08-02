@@ -37,7 +37,7 @@ if page == "Home":
 
         if st.button("Run Forecast"):
             with st.spinner("Running forecasts..."):
-                forecasts, kpis = run_forecast_for_all_skus(st.session_state.data, input_granularity, output_granularity, horizon)
+                forecasts, kpis = run_forecast_for_all_models(st.session_state.data, input_granularity, output_granularity, horizon)
                 st.session_state.results = forecasts
                 st.session_state.kpis = kpis
                 st.session_state.copilot = {
