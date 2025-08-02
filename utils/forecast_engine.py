@@ -9,14 +9,23 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 def mape(y_true, y_pred):
     return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
 
-def run_all_models(sku_df, forecast_periods, freq):
-    df = sku_df.copy()
-    df["Date"] = pd.to_datetime(df["Date"])
-    df = df.set_index("Date").resample(freq).sum().dropna()
-    df = df.reset_index().rename(columns={"Date": "ds", "Value": "y"})
+def run_all_models(sku_df, forecast_periods, output_freq):
+    # Parse dates
+    sku_df["Date"] = pd.to_datetime(sku_df["Date"])
+
+    # Aggregate to output frequency
+    if output_freq == "W":
+        sku_df["Period"] = sku_df["Date"].dt.to_period("W").dt.start_time
+    elif output_freq == "M":
+        sku_df["Period"] = sku_df["Date"].dt.to_period("M").dt.to_timestamp()
+    else:
+        return None, None, "Invalid frequency"
+
+    df = sku_df.groupby("Period").agg({"Quantity": "sum"}).reset_index()
+    df = df.rename(columns={"Period": "ds", "Quantity": "y"})
 
     if len(df) < forecast_periods + 3:
-        return None, None, "Insufficient data for forecasting."
+        return None, None, "Insufficient data after aggregation"
 
     train = df[:-forecast_periods]
     test = df[-forecast_periods:]
@@ -39,7 +48,7 @@ def run_all_models(sku_df, forecast_periods, freq):
     except:
         pass
 
-    # ETS (Exponential Smoothing)
+    # ETS
     try:
         model_ets = ExponentialSmoothing(train["y"], seasonal=None, trend="add", initialization_method="estimated")
         fit_ets = model_ets.fit()
@@ -62,8 +71,9 @@ def run_all_models(sku_df, forecast_periods, freq):
     # Prophet
     try:
         model_prophet = Prophet()
-        model_prophet.fit(train)
-        future = model_prophet.make_future_dataframe(periods=forecast_periods, freq=freq)
+        train_prophet = train.rename(columns={"ds": "ds", "y": "y"})
+        model_prophet.fit(train_prophet)
+        future = model_prophet.make_future_dataframe(periods=forecast_periods, freq=output_freq)
         forecast = model_prophet.predict(future)
         prophet_forecast = forecast.set_index("ds").loc[test["ds"]]["yhat"]
         kpis.append(("Prophet", mape(test["y"], prophet_forecast), mean_squared_error(test["y"], prophet_forecast, squared=False), mean_absolute_error(test["y"], prophet_forecast), (prophet_forecast - test["y"]).mean()))
