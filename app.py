@@ -11,7 +11,7 @@ st.sidebar.title("QuickCast")
 st.sidebar.markdown("Forecast-as-a-Service")
 page = st.sidebar.radio("Navigate", ["Home", "SKU Zoom", "Help & FAQ"])
 
-# Initialize session state
+# Session state initialization
 if "data" not in st.session_state:
     st.session_state.data = None
 if "forecast_combined" not in st.session_state:
@@ -19,14 +19,15 @@ if "forecast_combined" not in st.session_state:
 if "kpis" not in st.session_state:
     st.session_state.kpis = None
 
-# Utility: aggregate historical per SKU given output granularity
+# Helper: aggregate historical data per SKU according to output granularity
 def aggregate_history(sku_df, output_granularity):
     df = sku_df.copy()
-    # Detect date column
+    # Find date column
     date_col = next((c for c in df.columns if "date" in c.lower()), None)
     if date_col is None:
         return None
-    df[date_col] = pd.to_datetime(df[date_col])
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+    df = df.dropna(subset=[date_col])
     df = df.sort_values(date_col)
     df.set_index(date_col, inplace=True)
 
@@ -46,11 +47,13 @@ def aggregate_history(sku_df, output_granularity):
     agg = agg.rename(columns={qty_col: "Quantity"})
     return agg
 
-# Home Page
+# --- Home Page ---
 if page == "Home":
     st.title("QuickCast: Forecast-as-a-Service")
     st.markdown("## Step 1: Accept Terms & Conditions")
-    terms = st.checkbox("I confirm that the data I’m uploading is anonymized and that I accept the QuickCast Terms & Conditions.")
+    terms = st.checkbox(
+        "I confirm that the data I’m uploading is anonymized and that I accept the QuickCast Terms & Conditions."
+    )
     if not terms:
         st.warning("You must accept the Terms & Conditions to proceed.")
         st.stop()
@@ -76,11 +79,50 @@ if page == "Home":
         output_granularity = st.selectbox("2️⃣ Output forecast granularity", ["Weekly", "Monthly"])
         horizon = st.selectbox("3️⃣ Forecast horizon", ["3 months", "6 months", "9 months"])
 
-        # Determine number of forecast periods based on output granularity
+        # Map horizon to number of output periods
         if output_granularity == "Weekly":
             horizon_map = {"3 months": 12, "6 months": 24, "9 months": 36}
-        else:
+        else:  # Monthly
             horizon_map = {"3 months": 3, "6 months": 6, "9 months": 9}
         forecast_periods = horizon_map[horizon]
 
-        if st.button("Run Forec
+        if st.button("Run Forecast"):
+            data = st.session_state.data
+            if "SKU" not in data.columns:
+                st.error("Input file must contain a 'SKU' column.")
+                st.stop()
+
+            skus = data["SKU"].unique()
+            all_output_rows = []
+            kpi_frames = []
+            best_model_summary = []
+
+            for sku in skus:
+                sku_df = data[data["SKU"] == sku].copy()
+
+                # Run forecast engine
+                forecast_result, kpi_df, error = run_all_models(sku_df, forecast_periods, output_granularity)
+                if error:
+                    st.warning(f"Skipping SKU {sku}: {error}")
+                    continue
+
+                # Historical aggregation
+                hist = aggregate_history(sku_df, output_granularity)
+                if hist is not None:
+                    for _, row in hist.iterrows():
+                        date = row["Date"]
+                        qty = row["Quantity"]
+                        week_num = int(pd.to_datetime(date).isocalendar().week)
+                        month_name = pd.to_datetime(date).strftime("%B")
+                        all_output_rows.append({
+                            "SKU": sku,
+                            "Date": date,
+                            "Week Number": week_num,
+                            "Month Name": month_name,
+                            "Forecast/Actual": "Actual",
+                            "Forecast Method": "-",
+                            "Quantity": qty
+                        })
+
+                # Forecast rows
+                if forecast_result is not No_
