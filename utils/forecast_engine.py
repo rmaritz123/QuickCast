@@ -1,27 +1,112 @@
-KeyError: This app has encountered an error. The original error message is redacted to prevent data leaks. Full error details have been recorded in the logs (if you're on Streamlit Cloud, click on 'Manage app' in the lower right of your app).
-Traceback:
-File "/mount/src/quickcast/app.py", line 71, in <module>
-    forecast_df, kpi_df, error = run_all_models(sku_df, forecast_periods, freq)
-                                 ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-File "/mount/src/quickcast/utils/forecast_engine.py", line 24, in run_all_models
-    df = sku_df.groupby("Period").agg({"Quantity": "sum"}).reset_index()
-         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
-File "/home/adminuser/venv/lib/python3.13/site-packages/pandas/core/groupby/generic.py", line 1432, in aggregate
-    result = op.agg()
-File "/home/adminuser/venv/lib/python3.13/site-packages/pandas/core/apply.py", line 190, in agg
-    return self.agg_dict_like()
-           ~~~~~~~~~~~~~~~~~~^^
-File "/home/adminuser/venv/lib/python3.13/site-packages/pandas/core/apply.py", line 423, in agg_dict_like
-    return self.agg_or_apply_dict_like(op_name="agg")
-           ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
-File "/home/adminuser/venv/lib/python3.13/site-packages/pandas/core/apply.py", line 1603, in agg_or_apply_dict_like
-    result_index, result_data = self.compute_dict_like(
-                                ~~~~~~~~~~~~~~~~~~~~~~^
-        op_name, selected_obj, selection, kwargs
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    )
-    ^
-File "/home/adminuser/venv/lib/python3.13/site-packages/pandas/core/apply.py", line 462, in compute_dict_like
-    func = self.normalize_dictlike_arg(op_name, selected_obj, func)
-File "/home/adminuser/venv/lib/python3.13/site-packages/pandas/core/apply.py", line 663, in normalize_dictlike_arg
-    raise KeyError(f"Column(s) {list(cols)} do not exist")
+
+import pandas as pd
+import numpy as np
+from prophet import Prophet
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from statsmodels.tsa.arima.model import ARIMA
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+def mape(y_true, y_pred):
+    return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+
+def run_all_models(sku_df, forecast_periods, output_freq):
+    sku_df = sku_df.copy()
+    sku_df.columns = [c.strip() for c in sku_df.columns]
+
+    # Detect quantity column
+    possible_qty_cols = ["Quantity", "Qty", "Value"]
+    qty_col = next((col for col in possible_qty_cols if col in sku_df.columns), None)
+    if qty_col is None:
+        return None, None, "No quantity column found."
+
+    # Convert date
+    date_col = next((col for col in sku_df.columns if "date" in col.lower()), None)
+    if date_col is None:
+        return None, None, "No date column found."
+    sku_df[date_col] = pd.to_datetime(sku_df[date_col])
+
+    # Output frequency aggregation
+    if output_freq == "W":
+        sku_df["Period"] = sku_df[date_col].dt.to_period("W").dt.start_time
+    elif output_freq == "M":
+        sku_df["Period"] = sku_df[date_col].dt.to_period("M").dt.to_timestamp()
+    else:
+        return None, None, "Invalid frequency"
+
+    df = sku_df.groupby("Period").agg({qty_col: "sum"}).reset_index()
+    df = df.rename(columns={"Period": "ds", qty_col: "y"})
+
+    if len(df) < forecast_periods + 3:
+        return None, None, "Insufficient data after aggregation"
+
+    train = df[:-forecast_periods]
+    test = df[-forecast_periods:]
+    results = {}
+    kpis = []
+
+    # Naive
+    try:
+        naive_forecast = pd.Series([train["y"].iloc[-1]] * forecast_periods, index=test["ds"])
+        kpis.append(("Naive", mape(test["y"], naive_forecast), mean_squared_error(test["y"], naive_forecast, squared=False), mean_absolute_error(test["y"], naive_forecast), (naive_forecast - test["y"]).mean()))
+        results["Naive"] = naive_forecast
+    except:
+        pass
+
+    # Moving Average
+    try:
+        ma_forecast = pd.Series([train["y"].rolling(3).mean().iloc[-1]] * forecast_periods, index=test["ds"])
+        kpis.append(("Moving Average", mape(test["y"], ma_forecast), mean_squared_error(test["y"], ma_forecast, squared=False), mean_absolute_error(test["y"], ma_forecast), (ma_forecast - test["y"]).mean()))
+        results["Moving Average"] = ma_forecast
+    except:
+        pass
+
+    # ETS
+    try:
+        model_ets = ExponentialSmoothing(train["y"], seasonal=None, trend="add", initialization_method="estimated")
+        fit_ets = model_ets.fit()
+        ets_forecast = pd.Series(fit_ets.forecast(forecast_periods), index=test["ds"])
+        kpis.append(("ETS", mape(test["y"], ets_forecast), mean_squared_error(test["y"], ets_forecast, squared=False), mean_absolute_error(test["y"], ets_forecast), (ets_forecast - test["y"]).mean()))
+        results["ETS"] = ets_forecast
+    except:
+        pass
+
+    # ARIMA
+    try:
+        model_arima = ARIMA(train["y"], order=(1, 1, 1))
+        fit_arima = model_arima.fit()
+        arima_forecast = pd.Series(fit_arima.forecast(steps=forecast_periods), index=test["ds"])
+        kpis.append(("ARIMA", mape(test["y"], arima_forecast), mean_squared_error(test["y"], arima_forecast, squared=False), mean_absolute_error(test["y"], arima_forecast), (arima_forecast - test["y"]).mean()))
+        results["ARIMA"] = arima_forecast
+    except:
+        pass
+
+    # Prophet
+    try:
+        model_prophet = Prophet()
+        model_prophet.fit(train.rename(columns={"ds": "ds", "y": "y"}))
+        future = model_prophet.make_future_dataframe(periods=forecast_periods, freq=output_freq)
+        forecast = model_prophet.predict(future)
+        prophet_forecast = forecast.set_index("ds").loc[test["ds"]]["yhat"]
+        kpis.append(("Prophet", mape(test["y"], prophet_forecast), mean_squared_error(test["y"], prophet_forecast, squared=False), mean_absolute_error(test["y"], prophet_forecast), (prophet_forecast - test["y"]).mean()))
+        results["Prophet"] = prophet_forecast
+    except:
+        pass
+
+    kpi_df = pd.DataFrame(kpis, columns=["Model", "MAPE", "RMSE", "MAE", "Bias"])
+
+    if kpi_df.empty:
+        return None, None, "All models failed for this SKU."
+
+    best_model = kpi_df.sort_values("MAPE").iloc[0]["Model"]
+    forecast_values = results[best_model]
+
+    forecast_result = pd.DataFrame({
+        "SKU": sku_df["SKU"].iloc[0],
+        "Date": test["ds"],
+        "Forecast/Actual": "Forecast",
+        "Forecast Method": best_model,
+        "Quantity": forecast_values.values
+    })
+
+    return forecast_result, kpi_df, None
+
