@@ -1,7 +1,7 @@
 
 import streamlit as st
 import pandas as pd
-from utils.forecast_engine import run_forecast_for_all_skus
+from utils.forecast_engine import run_all_models
 from utils.report_generator import generate_sku_report
 from utils.copilot import generate_copilot_summary
 from datetime import datetime
