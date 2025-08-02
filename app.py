@@ -2,7 +2,10 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from utils.forecast_engine import run_all_models
+from prophet import Prophet
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from statsmodels.tsa.arima.model import ARIMA
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 st.set_page_config(page_title="QuickCast", layout="wide")
 
@@ -19,67 +22,78 @@ if "forecast_combined" not in st.session_state:
 if "kpis" not in st.session_state:
     st.session_state.kpis = None
 
-# Helper to aggregate historical data per SKU based on output granularity
-def aggregate_history(sku_df, output_granularity):
+# ---------------- Forecasting helpers ----------------
+
+def safe_mape(y_true, y_pred):
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    mask = y_true != 0
+    if not mask.any():
+        return np.nan
+    return np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100
+
+def aggregate_series(sku_df, output_granularity):
     df = sku_df.copy()
+    # detect date column
     date_col = next((c for c in df.columns if "date" in c.lower()), None)
     if date_col is None:
-        return None
+        raise ValueError("No date-like column found.")
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
     df = df.dropna(subset=[date_col])
+
+    # detect quantity column
+    qty_col = next((c for c in df.columns if c.lower() in ["quantity", "qty", "value"]), None)
+    if qty_col is None:
+        raise ValueError("No quantity column found.")
+
     df = df.sort_values(date_col)
     df.set_index(date_col, inplace=True)
 
     if output_granularity == "Weekly":
         rule = "W-MON"
+        prophet_freq = "W"
     elif output_granularity == "Monthly":
         rule = "MS"
+        prophet_freq = "MS"
     else:
-        rule = "D"
+        raise ValueError("Unsupported output granularity.")
 
-    agg = df.resample(rule).sum().reset_index()
-    agg.rename(columns={date_col: "Date"}, inplace=True)
-    qty_col = next((c for c in agg.columns if c.lower() in ["quantity", "qty", "value"]), None)
-    if qty_col is None:
-        return None
-    agg = agg.rename(columns={qty_col: "Quantity"})
-    return agg
+    agg = df.resample(rule)[qty_col].sum().reset_index()
+    agg = agg.rename(columns={date_col: "ds", qty_col: "y"})
+    return agg, prophet_freq
 
-# --- Home Page ---
-if page == "Home":
-    st.title("QuickCast: Forecast-as-a-Service")
-    st.markdown("## Step 1: Accept Terms & Conditions")
-    terms = st.checkbox(
-        "I confirm that the data I’m uploading is anonymized and that I accept the QuickCast Terms & Conditions."
-    )
-    if not terms:
-        st.warning("You must accept the Terms & Conditions to proceed.")
-        st.stop()
-
-    st.markdown("## Step 2: Upload Data")
-    uploaded = st.file_uploader("Upload Excel or CSV with columns: SKU, Date (or Invoice Date), Quantity", type=["xlsx", "csv"])
-    if uploaded:
-        try:
-            if uploaded.name.lower().endswith(".csv"):
-                df = pd.read_csv(uploaded)
+def evaluate_model(train, test, model_name, prophet_freq):
+    try:
+        if model_name == "Naive":
+            pred = pd.Series([train["y"].iloc[-1]] * len(test), index=test["ds"])
+        elif model_name == "Moving Average":
+            window = 3
+            if len(train["y"]) < window:
+                val = train["y"].iloc[-1]
             else:
-                df = pd.read_excel(uploaded)
-            st.session_state.data = df
-            st.success("File uploaded successfully.")
-            st.dataframe(df.head())
-        except Exception as e:
-            st.error(f"Failed to read upload: {e}")
-            st.stop()
-
-    if st.session_state.data is not None:
-        st.markdown("## Step 3: Forecast Settings")
-        _ = st.selectbox("1️⃣ Granularity of uploaded data (informational)", ["Daily", "Weekly", "Monthly"])
-        output_granularity = st.selectbox("2️⃣ Output forecast granularity", ["Weekly", "Monthly"])
-        horizon = st.selectbox("3️⃣ Forecast horizon", ["3 months", "6 months", "9 months"])
-
-        # Determine forecast periods: weeks if Weekly, months if Monthly
-        if output_granularity == "Weekly":
-            horizon_map = {"3 months": 12, "6 months": 24, "9 months": 36}
+                val = train["y"].rolling(window).mean().iloc[-1]
+            pred = pd.Series([val] * len(test), index=test["ds"])
+        elif model_name == "ETS":
+            model = ExponentialSmoothing(train["y"], trend="add", seasonal=None, initialization_method="estimated")
+            fit = model.fit()
+            pred = pd.Series(fit.forecast(len(test)), index=test["ds"])
+        elif model_name == "ARIMA":
+            model = ARIMA(train["y"], order=(1, 1, 1))
+            fit = model.fit()
+            pred = pd.Series(fit.forecast(steps=len(test)), index=test["ds"])
+        elif model_name == "Prophet":
+            prophet = Prophet()
+            prophet.fit(train)
+            future = prophet.make_future_dataframe(periods=len(test), freq=prophet_freq)
+            forecast_df = prophet.predict(future)
+            pred = forecast_df.set_index("ds").loc[test["ds"]]["yhat"]
         else:
-            horizon_map = {"3 months": 3, "6 months": 6, "9 months": 9}
-        forecast_periods = horizon_map[hori]()
+            return None, None
+
+        y_true = test["y"]
+        y_pred = pred
+        model_mape = safe_mape(y_true.values, y_pred.values)
+        model_rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+        model_mae = mean_absolute_error(y_true, y_pred)
+        bias = (y_pred - y_true).mean()
+        kpis
