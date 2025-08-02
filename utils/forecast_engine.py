@@ -72,6 +72,10 @@ def run_all_models(sku_df, forecast_periods, freq):
         pass
 
     kpi_df = pd.DataFrame(kpis, columns=["Model", "MAPE", "RMSE", "MAE", "Bias"])
+
+    if kpi_df.empty:
+        return None, None, "All models failed for this SKU."
+
     best_model = kpi_df.sort_values("MAPE").iloc[0]["Model"]
     forecast_values = results[best_model]
 
